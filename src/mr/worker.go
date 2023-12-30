@@ -199,7 +199,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		wlogger.Fatalf("dialing: %s. Most probably the coordinator exited before this worker\n", err.Error())
 	}
 	defer c.Close()
 
@@ -208,6 +208,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	log.Println(err)
+	wlogger.Println(err)
 	return false
 }
