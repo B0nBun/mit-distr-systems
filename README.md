@@ -15,6 +15,15 @@ All of the details regarding the building/compilation/running/testing process an
 
 The code is located in: `src/mr/*.go`
 
-For easier debugging and testing, I additionally added an `mr.sh` script. It requires [GNU parallel](https://www.gnu.org/software/parallel/) to work and starts the map-reduce with a selected number of workers and selected plugin (picking `src/main/pg-*` as input).
+For easier debugging and testing, I added an `mr.sh` script. It requires [GNU parallel](https://www.gnu.org/software/parallel/) to work and starts the map-reduce with selected plugin and selected number of workers (picking `src/main/pg-*` as input).
+```
+Usage: ./mr.sh [plugin] [worker-count]
+       - plugin defaults to 'wc'
+       - worker-count defaults to 8
+       All of the plugins are located in 'src/mrapps'
+```
+```
+./mr.sh grep 1 # Run grep with 1 worker (pattern is specified in src/mrapps/grep.go)
+```
 
 ## Lab 2: ...
