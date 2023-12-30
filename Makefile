@@ -32,3 +32,6 @@ LABS=" lab1 lab2a lab2b lab2c lab2d lab3a lab3b lab4a lab4b "
 check-%:
 	@echo "Checking that your submission builds correctly..."
 	@./.check-build git://g.csail.mit.edu/6.5840-golabs-2023 $(patsubst check-%,%,$@)
+
+clean-mr:
+	rm -f ./src/main/map-inter-* ./src/main/mr-out-*

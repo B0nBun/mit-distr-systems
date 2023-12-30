@@ -1,29 +1,34 @@
 package mr
 
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
+import (
+	"os"
+	"strconv"
+)
 
-import "os"
-import "strconv"
+type EmptyArgs struct{}
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+type EmptyReply struct{}
 
-type ExampleArgs struct {
-	X int
+type GetMapTaskReply struct {
+	TaskId   int
+	NoTasks  bool
+	Filename string
+	NReduce  int
 }
 
-type ExampleReply struct {
-	Y int
+type GetReduceTaskReply struct {
+	TaskId      int
+	NoTasks     bool
+	ReduceIndex int
 }
 
-// Add your RPC definitions here.
+type CompleteTaskArgs struct {
+	TaskId int
+}
 
+type ShouldExitReply struct {
+	ShouldExit bool
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
