@@ -40,7 +40,7 @@ type Coordinator struct {
 	IdIncrement *safeCounter
 }
 
-var clogger = log.New(os.Stdout, "Coordinator: ", 0)
+var clogger = DLogger{log.New(os.Stdout, "Coordinator: ", 0)}
 
 func (c *Coordinator) GetMapTask(_ *EmptyArgs, reply *GetMapTaskReply) error {
 	c.mu.Lock()
@@ -51,7 +51,7 @@ func (c *Coordinator) GetMapTask(_ *EmptyArgs, reply *GetMapTaskReply) error {
 		return nil
 	}
 	task := c.MapTasks[idx]
-	clogger.Printf("Giving map-task[id=%v] to a worker\n", task.TaskId)
+	clogger.DPrintf("Giving map-task[id=%v] to a worker\n", task.TaskId)
 	*reply = GetMapTaskReply{
 		NoTasks:  false,
 		TaskId:   task.TaskId,
@@ -66,7 +66,7 @@ func (c *Coordinator) GetMapTask(_ *EmptyArgs, reply *GetMapTaskReply) error {
 		defer c.mu.Unlock()
 		complete := c.mapTaskComplete(taskId)
 		if !complete {
-			clogger.Printf("Worker didn't finish map-task[id=%v] in %v. Setting it's state to idle", taskId, workerTimeout.String())
+			clogger.DPrintf("Worker didn't finish map-task[id=%v] in %v. Setting it's state to idle", taskId, workerTimeout.String())
 			c.resetMapTask(taskId)
 		}
 	}(c, task.TaskId)
@@ -83,7 +83,7 @@ func (c *Coordinator) GetReduceTask(_ *EmptyArgs, reply *GetReduceTaskReply) err
 		return nil
 	}
 	task := c.ReduceTasks[idx]
-	clogger.Printf("Giving reduce-task[id=%v] to a worker\n", task.TaskId)
+	clogger.DPrintf("Giving reduce-task[id=%v] to a worker\n", task.TaskId)
 	*reply = GetReduceTaskReply{
 		NoTasks:     false,
 		TaskId:      task.TaskId,
@@ -97,7 +97,7 @@ func (c *Coordinator) GetReduceTask(_ *EmptyArgs, reply *GetReduceTaskReply) err
 		defer c.mu.Unlock()
 		complete := c.reduceTaskComplete(taskId)
 		if !complete {
-			clogger.Printf("Worker didn't finish reduce-task[id=%v] in %v. Setting it's state to idle", taskId, workerTimeout.String())
+			clogger.DPrintf("Worker didn't finish reduce-task[id=%v] in %v. Setting it's state to idle", taskId, workerTimeout.String())
 			c.resetReduceTask(taskId)
 		}
 	}(c, task.TaskId)
@@ -113,13 +113,13 @@ func (c *Coordinator) CompleteMapTask(args *CompleteTaskArgs, _ *EmptyReply) err
 		return nil
 	}
 	task := c.MapTasks[idx]
-	clogger.Printf("map-task[id=%v] complete\n", task.TaskId)
+	clogger.DPrintf("map-task[id=%v] complete\n", task.TaskId)
 	c.MapTasks[idx].State = taskStateComplete
 
 	allComplete := -1 == c.findMapTask(func(t mapTask) bool { return t.State != taskStateComplete })
 
 	if allComplete {
-		clogger.Printf("All map-tasks complete, adding %v reduce-tasks\n", c.NReduce)
+		clogger.DPrintf("All map-tasks complete, adding %v reduce-tasks\n", c.NReduce)
 		for i := 0; i < c.NReduce; i++ {
 			c.addReduceTask(i)
 		}
@@ -135,20 +135,20 @@ func (c *Coordinator) CompleteReduceTask(args *CompleteTaskArgs, _ *EmptyReply) 
 		return nil
 	}
 	task := c.ReduceTasks[idx]
-	clogger.Printf("reduce-task[id=%v] complete\n", task.TaskId)
+	clogger.DPrintf("reduce-task[id=%v] complete\n", task.TaskId)
 	c.ReduceTasks[idx].State = taskStateComplete
 
 	files, err := findFilesWithMapResults(task.ReduceIndex)
 	if err != nil {
-		clogger.Printf("Couldn't find intermediate files for reduce-index=%v", task.ReduceIndex)
+		clogger.DPrintf("Couldn't find intermediate files for reduce-index=%v", task.ReduceIndex)
 		return nil
 	}
 
-	clogger.Printf("Deleting files for reduce-index=%v %v", task.ReduceIndex, files)
+	clogger.DPrintf("Deleting files for reduce-index=%v %v", task.ReduceIndex, files)
 	for _, file := range files {
 		err := os.Remove(file)
 		if err != nil {
-			clogger.Printf("Couldn't remove file for reduce-index=%v with filename=%v", task.ReduceIndex, file)
+			clogger.DPrintf("Couldn't remove file for reduce-index=%v with filename=%v", task.ReduceIndex, file)
 		}
 	}
 	return nil
@@ -238,7 +238,7 @@ func (c *Coordinator) server() {
 	if e != nil {
 		clogger.Fatal("listen error:", e)
 	}
-	clogger.Printf("http.Serve\n")
+	clogger.DPrintf("http.Serve\n")
 	go http.Serve(l, nil)
 }
 
@@ -264,7 +264,7 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	clogger.Printf("Init\n")
+	clogger.DPrintf("Init\n")
 	
 	idIncrement := makeSafeCounter(1)
 	c := Coordinator{
@@ -274,7 +274,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		IdIncrement: &idIncrement,
 	}
 
-	clogger.Printf("Starting with %v map-tasks\n", len(files))
+	clogger.DPrintf("Starting with %v map-tasks\n", len(files))
 	for _, file := range files {
 		c.addMapTask(file)
 	}

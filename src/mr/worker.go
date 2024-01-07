@@ -65,7 +65,7 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-var wlogger = log.New(os.Stdout, "Worker: ", 0)
+var wlogger = DLogger{log.New(os.Stdout, "Worker: ", 0)}
 
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
@@ -80,12 +80,12 @@ func Worker(mapf func(string, string) []KeyValue,
 		// Map task
 		{
 			var reply GetMapTaskReply
-			wlogger.Printf("Getting the map task\n")
+			wlogger.DPrintf("Getting the map task\n")
 			call("Coordinator.GetMapTask", &emptyArgs, &reply)
 			if !reply.NoTasks {
 				taskId := reply.TaskId
 				wlogger.SetPrefix(fmt.Sprintf("Worker[pid=%v task=%v]: ", pid, taskId))
-				wlogger.Printf("Executing map task for file '%s'\n", reply.Filename)
+				wlogger.DPrintf("Executing map task for file '%s'\n", reply.Filename)
 				bytes, err := os.ReadFile(reply.Filename)
 				if err != nil {
 					wlogger.Fatal(err)
@@ -102,7 +102,7 @@ func Worker(mapf func(string, string) []KeyValue,
 					}
 				}
 
-				wlogger.Printf("Completing map task for file '%s'\n", reply.Filename)
+				wlogger.DPrintf("Completing map task for file '%s'\n", reply.Filename)
 				call("Coordinator.CompleteMapTask", &CompleteTaskArgs{taskId}, &emptyReply)
 				continue
 			}
@@ -110,7 +110,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		// Reduce task
 		{
-			wlogger.Printf("Getting the reduce task\n")
+			wlogger.DPrintf("Getting the reduce task\n")
 			var reply GetReduceTaskReply
 			call("Coordinator.GetReduceTask", &emptyArgs, &reply)
 			if !reply.NoTasks {
@@ -166,21 +166,21 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		// Checking for exit
 		{
-			wlogger.Printf("Checking if worker should exit\n")
+			wlogger.DPrintf("Checking if worker should exit\n")
 			var reply ShouldExitReply
 			call("Coordinator.ShouldExit", &emptyArgs, &reply)
 			if reply.ShouldExit {
 				break
 			} else {
 				dur := 1500 * time.Millisecond
-				wlogger.Printf("No available tasks, waiting for %v\n", dur.String())
+				wlogger.DPrintf("No available tasks, waiting for %v\n", dur.String())
 				time.Sleep(dur)
 				continue
 			}
 		}
 	}
 
-	wlogger.Printf("Exiting\n")
+	wlogger.DPrintf("Exiting\n")
 }
 
 func filenameForMapResult(reduceIdx int, taskId int) string {
