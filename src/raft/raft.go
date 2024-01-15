@@ -76,11 +76,11 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 
-	logger        *log.Logger
-	dead          chan struct{}
-	electionTimer *time.Timer
+	logger          *log.Logger
+	dead            chan struct{}
+	electionTimer   *time.Timer
 	heartbeatTicker *time.Ticker
-	
+
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -214,7 +214,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	canVote := rf.votedFor == -1 || rf.votedFor == args.CandidateId
 	staleTerm := args.Term < rf.currentTerm
 	staleLog := args.LastLogTerm < lastLogTerm
-	rf.logger.Printf("canVote=%v, staleTerm=%v, staleLog=%v", canVote, staleTerm, staleLog)
 	if staleTerm || staleLog || !canVote {
 		reply.VoteGranted = false
 		return
@@ -333,16 +332,19 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatTicker.C:
 			if rf.state == rfStateLeader {
 				go rf.sendHeartbeats()
-			} else {
 			}
 		case <-rf.electionTimer.C:
-			go rf.startElection()
+			if rf.state != rfStateLeader {
+				rf.resetElectionTimer()
+				go rf.startElection()
+			} else {
+				rf.resetElectionTimer()
+			}
 		}
 	}
 }
 
 func (rf *Raft) startElection() {
-	rf.resetElectionTimer()
 	rf.setState(rfStateCandidate)
 	rf.logger.Printf("starting election")
 	rf.currentTerm += 1
