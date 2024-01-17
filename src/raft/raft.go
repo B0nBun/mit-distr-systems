@@ -32,6 +32,7 @@ import (
 )
 
 const debug = false
+const rpcTimeout = 500 * time.Millisecond
 
 type Command interface{}
 
@@ -282,14 +283,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, timeoutD time.Duration) bool {
+	okC := make(chan bool)
+	timeout := time.NewTimer(timeoutD)
+	go func() {
+		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+		okC<-ok
+	}()
+	select {
+	case ok := <-okC:
+		return ok
+	case <-timeout.C:
+		return false
+	}
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, timeoutD time.Duration) bool {
+	okC := make(chan bool)
+	timeout := time.NewTimer(timeoutD)
+	go func() {
+		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		okC<-ok
+	}()
+	select {
+	case ok := <-okC:
+		return ok
+	case <-timeout.C:
+		return false
+	}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -416,12 +437,12 @@ func (rf *Raft) gatherVotes() (int, bool) {
 		go func() {
 			defer wg.Done()
 			reply := RequestVoteReply{}
-			rf.sendRequestVote(server, &args, &reply)
+			ok := rf.sendRequestVote(server, &args, &reply, rpcTimeout)
 			shared.mu.Lock()
-			if reply.VoteGranted {
+			if ok && reply.VoteGranted {
 				shared.votes += 1
 			}
-			if reply.Term > args.Term {
+			if ok && reply.Term > args.Term {
 				shared.staleTerm = true
 			}
 			shared.mu.Unlock()
@@ -441,22 +462,37 @@ func (rf *Raft) sendHeartbeats() {
 		Term:     rf.currentTerm,
 		LeaderId: rf.me,
 	}
+	var (
+		maxTermMu sync.Mutex
+		maxTerm int = rf.currentTerm
+		wg sync.WaitGroup
+	)
 	rf.mu.Unlock()
 	for server, _ := range rf.peers {
 		if server == rf.me {
 			continue
 		}
-		reply := AppendEntriesReply{}
-		go rf.sendAppendEntries(server, &args, &reply)
-		rf.mu.Lock()
-		if reply.Term > rf.currentTerm {
-			rf.setState(rfStateFollower)
-			rf.currentTerm = reply.Term
-			rf.mu.Unlock()
-			break
-		}
-		rf.mu.Unlock()
+		
+		wg.Add(1)
+		go func(server int) {
+			defer wg.Done()
+			reply := AppendEntriesReply{}
+			rf.sendAppendEntries(server, &args, &reply, rpcTimeout)
+			maxTermMu.Lock()
+			if maxTerm < reply.Term {
+				maxTerm = reply.Term
+			}
+			maxTermMu.Unlock()
+		}(server)
 	}
+	wg.Wait()
+
+	rf.mu.Lock()
+	if maxTerm > rf.currentTerm {
+		rf.setState(rfStateFollower)
+		rf.currentTerm = maxTerm
+	}
+	rf.mu.Unlock()
 }
 
 // the service or tester wants to create a Raft server. the ports
