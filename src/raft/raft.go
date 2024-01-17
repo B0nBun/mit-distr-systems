@@ -31,8 +31,8 @@ import (
 	"io/ioutil"
 )
 
-const debug = false
-const rpcTimeout = 500 * time.Millisecond
+const debug = true
+const rpcTimeout = 700 * time.Millisecond
 
 type Command interface{}
 
@@ -434,7 +434,7 @@ func (rf *Raft) gatherVotes() (int, bool) {
 		}
 
 		wg.Add(1)
-		go func() {
+		go func(server int) {
 			defer wg.Done()
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(server, &args, &reply, rpcTimeout)
@@ -446,7 +446,7 @@ func (rf *Raft) gatherVotes() (int, bool) {
 				shared.staleTerm = true
 			}
 			shared.mu.Unlock()
-		}()
+		}(server)
 	}
 
 	wg.Wait()
