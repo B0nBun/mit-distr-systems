@@ -365,15 +365,14 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 
 	rf.logger.Printf("starting election with term=%d", rf.currentTerm)
-	// TODO: Gather votes concurrently
-	votes := rf.gatherVotes()
-	rf.logger.Printf("got %d votes from election for term=%d", votes, startingTerm)
+	votes, ok := rf.gatherVotes()
+	rf.logger.Printf("got %d votes (ok=%v) from election for term=%d", votes, ok, startingTerm)
 
 	rf.mu.Lock()
 	stillCandidate := rf.state == rfStateCandidate
 	elected := votes >= len(rf.peers)/2+1
 	sameTerm := startingTerm == rf.currentTerm
-	if stillCandidate && elected && sameTerm {
+	if ok && stillCandidate && elected && sameTerm {
 		rf.mu.Unlock()
 		rf.becomeLeader()
 	} else {
@@ -388,56 +387,67 @@ func (rf *Raft) becomeLeader() {
 	rf.sendHeartbeats()
 }
 
-func (rf *Raft) gatherVotes() int {
-	votes := 1
+func (rf *Raft) gatherVotes() (int, bool) {
+	rf.mu.Lock()
+	args := RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: len(rf.log),
+		LastLogTerm:  rf.lastLogTerm(),
+	}
+	rf.mu.Unlock()
+
+	// Struct shared between goroutines
+	var shared struct {
+		mu sync.Mutex
+		votes int
+		staleTerm bool
+	}
+	shared.votes = 1
+	shared.staleTerm = false
+
+	var wg sync.WaitGroup
 	for server, _ := range rf.peers {
 		if server == rf.me {
 			continue
 		}
 
-		rf.mu.Lock()
-		args := RequestVoteArgs{
-			Term:         rf.currentTerm,
-			CandidateId:  rf.me,
-			LastLogIndex: len(rf.log),
-			LastLogTerm:  rf.lastLogTerm(),
-		}
-		rf.mu.Unlock()
-
-		reply := RequestVoteReply{}
-		rf.sendRequestVote(server, &args, &reply)
-		if reply.VoteGranted {
-			votes += 1
-		}
-		if reply.Term > rf.currentTerm {
-			rf.mu.Lock()
-			rf.setState(rfStateFollower)
-			rf.currentTerm = reply.Term
-			rf.mu.Unlock()
-			break
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reply := RequestVoteReply{}
+			rf.sendRequestVote(server, &args, &reply)
+			shared.mu.Lock()
+			if reply.VoteGranted {
+				shared.votes += 1
+			}
+			if reply.Term > args.Term {
+				shared.staleTerm = true
+			}
+			shared.mu.Unlock()
+		}()
 	}
 
-	return votes
+	wg.Wait()
+
+	ok := !shared.staleTerm
+	return shared.votes, ok
 }
 
 func (rf *Raft) sendHeartbeats() {
-	// TODO: Send heartbets concurrently
 	rf.logger.Printf("sending heartbeats")
+	rf.mu.Lock()
+	args := AppendEntriesArgs{
+		Term:     rf.currentTerm,
+		LeaderId: rf.me,
+	}
+	rf.mu.Unlock()
 	for server, _ := range rf.peers {
 		if server == rf.me {
 			continue
 		}
-
-		rf.mu.Lock()
-		args := AppendEntriesArgs{
-			Term:     rf.currentTerm,
-			LeaderId: rf.me,
-		}
-		rf.mu.Unlock()
-
 		reply := AppendEntriesReply{}
-		rf.sendAppendEntries(server, &args, &reply)
+		go rf.sendAppendEntries(server, &args, &reply)
 		rf.mu.Lock()
 		if reply.Term > rf.currentTerm {
 			rf.setState(rfStateFollower)
