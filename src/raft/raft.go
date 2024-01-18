@@ -21,7 +21,6 @@ import (
 	//	"bytes"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"sync"
 	"time"
@@ -79,7 +78,7 @@ type Raft struct {
 
 	logger          *log.Logger
 	dead            chan struct{}
-	electionTimer   *time.Timer
+	electionTicker   *RandomTicker
 	heartbeatTicker *time.Ticker
 
 	// Your data here (2A, 2B, 2C).
@@ -113,6 +112,8 @@ func (rf *Raft) setState(state rfState) {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == rfStateLeader
 }
 
@@ -121,12 +122,6 @@ func (rf *Raft) lastLogTerm() int {
 		return -1
 	}
 	return rf.log[len(rf.log)-1].term
-}
-
-func (rf *Raft) resetElectionTimer() bool {
-	ms := 200 + (rand.Int63() % 300)
-	rf.electionTimer.Stop()
-	return rf.electionTimer.Reset(time.Duration(ms) * time.Millisecond)
 }
 
 // save Raft's persistent state to stable storage,
@@ -201,7 +196,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer func(reply *RequestVoteReply) {
 		rf.logger.Printf("got RequestVote rpc from rf[i=%d] with term=%d. VoteGranted=%v", args.CandidateId, args.Term, reply.VoteGranted)
 		if reply.VoteGranted {
-			rf.resetElectionTimer()
+			rf.electionTicker.Reset()
 			rf.votedFor = args.CandidateId
 		}
 	}(reply)
@@ -248,7 +243,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = args.Term < rf.currentTerm
 	if args.Term >= rf.currentTerm {
-		rf.resetElectionTimer()
+		rf.electionTicker.Reset()
 	}
 	if args.Term > rf.currentTerm {
 		rf.setState(rfStateFollower)
@@ -347,7 +342,7 @@ func (rf *Raft) Start(command Command) (int, int, bool) {
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.heartbeatTicker.Stop()
-	rf.electionTimer.Stop()
+	rf.electionTicker.Stop()
 	rf.dead <- struct{}{}
 }
 
@@ -364,9 +359,8 @@ func (rf *Raft) ticker() {
 			} else {
 				rf.mu.Unlock()
 			}
-		case <-rf.electionTimer.C:
+		case <-rf.electionTicker.C:
 			rf.mu.Lock()
-			rf.resetElectionTimer()
 			if rf.state != rfStateLeader {
 				rf.mu.Unlock()
 				go rf.startElection()
@@ -520,9 +514,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.electionTimer = time.NewTimer(time.Minute)
-	rf.electionTimer.Stop()
-	rf.resetElectionTimer()
+	rf.electionTicker = NewRandomTicker(300 * time.Millisecond, 600 * time.Millisecond)
 	rf.heartbeatTicker = time.NewTicker(110 * time.Millisecond)
 	rf.state = rfStateFollower
 	rf.logger = log.New(os.Stdout, fmt.Sprintf("%v: ", rf), 0)
