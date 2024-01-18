@@ -31,7 +31,7 @@ import (
 	"io/ioutil"
 )
 
-const debug = true
+const debug = false
 const rpcTimeout = 700 * time.Millisecond
 
 type Command interface{}
@@ -244,7 +244,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.logger.Printf("got AppendEntries rpc from rf[id=%d]", args.LeaderId)
+	rf.logger.Printf("got AppendEntries rpc from rf[i=%d]", args.LeaderId)
 	reply.Term = rf.currentTerm
 	reply.Success = args.Term < rf.currentTerm
 	if args.Term >= rf.currentTerm {
@@ -386,10 +386,16 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 
 	rf.logger.Printf("starting election with term=%d", rf.currentTerm)
-	votes, ok := rf.gatherVotes()
+	votes, maxTerm, ok := rf.gatherVotes()
 	rf.logger.Printf("got %d votes (ok=%v) from election for term=%d", votes, ok, startingTerm)
 
 	rf.mu.Lock()
+	if maxTerm > rf.currentTerm {
+		rf.setState(rfStateFollower)
+		rf.currentTerm = maxTerm
+		rf.mu.Unlock()
+		return
+	}
 	stillCandidate := rf.state == rfStateCandidate
 	elected := votes >= len(rf.peers)/2+1
 	sameTerm := startingTerm == rf.currentTerm
@@ -408,7 +414,7 @@ func (rf *Raft) becomeLeader() {
 	rf.sendHeartbeats()
 }
 
-func (rf *Raft) gatherVotes() (int, bool) {
+func (rf *Raft) gatherVotes() (int, int, bool) {
 	rf.mu.Lock()
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -422,10 +428,12 @@ func (rf *Raft) gatherVotes() (int, bool) {
 	var shared struct {
 		mu sync.Mutex
 		votes int
-		staleTerm bool
+		maxTerm int
+		ok bool
 	}
 	shared.votes = 1
-	shared.staleTerm = false
+	shared.maxTerm = rf.currentTerm
+	shared.ok = true
 
 	var wg sync.WaitGroup
 	for server, _ := range rf.peers {
@@ -442,8 +450,11 @@ func (rf *Raft) gatherVotes() (int, bool) {
 			if ok && reply.VoteGranted {
 				shared.votes += 1
 			}
-			if ok && reply.Term > args.Term {
-				shared.staleTerm = true
+			if ok && reply.Term > shared.maxTerm {
+				shared.maxTerm = reply.Term
+			}
+			if !ok {
+				shared.ok = false
 			}
 			shared.mu.Unlock()
 		}(server)
@@ -451,8 +462,7 @@ func (rf *Raft) gatherVotes() (int, bool) {
 
 	wg.Wait()
 
-	ok := !shared.staleTerm
-	return shared.votes, ok
+	return shared.votes, shared.maxTerm, shared.ok
 }
 
 func (rf *Raft) sendHeartbeats() {
@@ -513,7 +523,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.NewTimer(time.Minute)
 	rf.electionTimer.Stop()
 	rf.resetElectionTimer()
-	rf.heartbeatTicker = time.NewTicker(100 * time.Millisecond)
+	rf.heartbeatTicker = time.NewTicker(110 * time.Millisecond)
 	rf.state = rfStateFollower
 	rf.logger = log.New(os.Stdout, fmt.Sprintf("%v: ", rf), 0)
 	if !debug {
