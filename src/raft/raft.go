@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
@@ -380,8 +381,8 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 
 	rf.logger.Printf("starting election with term=%d", rf.currentTerm)
-	votes, maxTerm, ok := rf.gatherVotes()
-	rf.logger.Printf("got %d votes (ok=%v) from election for term=%d", votes, ok, startingTerm)
+	elected, maxTerm := rf.gatherVotes()
+	rf.logger.Printf("got (elected=%v) from election for term=%d", elected, startingTerm)
 
 	rf.mu.Lock()
 	if maxTerm > rf.currentTerm {
@@ -391,9 +392,8 @@ func (rf *Raft) startElection() {
 		return
 	}
 	stillCandidate := rf.state == rfStateCandidate
-	elected := votes >= len(rf.peers)/2+1
 	sameTerm := startingTerm == rf.currentTerm
-	if ok && stillCandidate && elected && sameTerm {
+	if stillCandidate && elected && sameTerm {
 		rf.mu.Unlock()
 		rf.becomeLeader()
 	} else {
@@ -408,7 +408,7 @@ func (rf *Raft) becomeLeader() {
 	rf.sendHeartbeats()
 }
 
-func (rf *Raft) gatherVotes() (int, int, bool) {
+func (rf *Raft) gatherVotes() (bool, int) {
 	rf.mu.Lock()
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -418,45 +418,43 @@ func (rf *Raft) gatherVotes() (int, int, bool) {
 	}
 	rf.mu.Unlock()
 
-	// Struct shared between goroutines
-	var shared struct {
-		mu sync.Mutex
-		votes int
-		maxTerm int
-		ok bool
-	}
-	shared.votes = 1
-	shared.maxTerm = rf.currentTerm
-	shared.ok = true
+	maxTerm := atomic.Int32{}
+	maxTerm.Store(int32(rf.currentTerm))
 
-	var wg sync.WaitGroup
+	var totalWg sync.WaitGroup
+	totalWg.Add(len(rf.peers) - 1)
+	
+	var electWg sync.WaitGroup
+	votesNeed := len(rf.peers) / 2 + 1
+	electWg.Add(votesNeed)
+	
 	for server, _ := range rf.peers {
 		if server == rf.me {
 			continue
 		}
 
-		wg.Add(1)
 		go func(server int) {
-			defer wg.Done()
+			defer totalWg.Done()
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(server, &args, &reply, rpcTimeout)
-			shared.mu.Lock()
 			if ok && reply.VoteGranted {
-				shared.votes += 1
+				electWg.Done()
 			}
-			if ok && reply.Term > shared.maxTerm {
-				shared.maxTerm = reply.Term
+			if ok && int32(reply.Term) > maxTerm.Load() {
+				maxTerm.Store(int32(reply.Term))
 			}
-			if !ok {
-				shared.ok = false
-			}
-			shared.mu.Unlock()
 		}(server)
 	}
 
-	wg.Wait()
+	elected := WaitGroupChannel(&electWg)
+	done := WaitGroupChannel(&totalWg)
 
-	return shared.votes, shared.maxTerm, shared.ok
+	select {
+	case <-elected:
+		return true, int(maxTerm.Load())
+	case <-done:
+		return false, int(maxTerm.Load())
+	}
 }
 
 func (rf *Raft) sendHeartbeats() {
@@ -466,37 +464,24 @@ func (rf *Raft) sendHeartbeats() {
 		Term:     rf.currentTerm,
 		LeaderId: rf.me,
 	}
-	var (
-		maxTermMu sync.Mutex
-		maxTerm int = rf.currentTerm
-		wg sync.WaitGroup
-	)
 	rf.mu.Unlock()
+
 	for server, _ := range rf.peers {
 		if server == rf.me {
 			continue
 		}
 		
-		wg.Add(1)
 		go func(server int) {
-			defer wg.Done()
 			reply := AppendEntriesReply{}
 			rf.sendAppendEntries(server, &args, &reply, rpcTimeout)
-			maxTermMu.Lock()
-			if maxTerm < reply.Term {
-				maxTerm = reply.Term
+			rf.mu.Lock()
+			if rf.currentTerm < reply.Term {
+				rf.setState(rfStateFollower)
+				rf.currentTerm = reply.Term				
 			}
-			maxTermMu.Unlock()
+			rf.mu.Unlock()
 		}(server)
 	}
-	wg.Wait()
-
-	rf.mu.Lock()
-	if maxTerm > rf.currentTerm {
-		rf.setState(rfStateFollower)
-		rf.currentTerm = maxTerm
-	}
-	rf.mu.Unlock()
 }
 
 // the service or tester wants to create a Raft server. the ports

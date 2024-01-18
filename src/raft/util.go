@@ -4,6 +4,7 @@ import (
 	"log"
 	"math/rand"
 	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,15 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 		log.Printf(format, a...)
 	}
 	return
+}
+
+func WaitGroupChannel(wg *sync.WaitGroup) chan struct{} {
+	c := make(chan struct{})
+	defer func() {
+		wg.Wait()
+		close(c)
+	}()
+	return c
 }
 
 type RandomTicker struct {
