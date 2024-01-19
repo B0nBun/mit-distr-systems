@@ -23,7 +23,6 @@ import (
 	"log"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
@@ -381,16 +380,10 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 
 	rf.logger.Printf("starting election with term=%d", rf.currentTerm)
-	elected, maxTerm := rf.gatherVotes()
+	elected := rf.gatherVotes()
 	rf.logger.Printf("got (elected=%v) from election for term=%d", elected, startingTerm)
 
 	rf.mu.Lock()
-	if maxTerm > rf.currentTerm {
-		rf.setState(rfStateFollower)
-		rf.currentTerm = maxTerm
-		rf.mu.Unlock()
-		return
-	}
 	stillCandidate := rf.state == rfStateCandidate
 	sameTerm := startingTerm == rf.currentTerm
 	if stillCandidate && elected && sameTerm {
@@ -408,7 +401,7 @@ func (rf *Raft) becomeLeader() {
 	rf.sendHeartbeats()
 }
 
-func (rf *Raft) gatherVotes() (bool, int) {
+func (rf *Raft) gatherVotes() bool {
 	rf.mu.Lock()
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -418,15 +411,10 @@ func (rf *Raft) gatherVotes() (bool, int) {
 	}
 	rf.mu.Unlock()
 
-	maxTerm := atomic.Int32{}
-	maxTerm.Store(int32(rf.currentTerm))
-
-	var totalWg sync.WaitGroup
-	totalWg.Add(len(rf.peers) - 1)
-	
-	var electWg sync.WaitGroup
-	votesNeed := len(rf.peers) / 2 + 1
-	electWg.Add(votesNeed)
+	mu := sync.Mutex{}
+	cond := sync.NewCond(&mu)
+	votes := 1
+	finished := 0
 	
 	for server, _ := range rf.peers {
 		if server == rf.me {
@@ -434,27 +422,32 @@ func (rf *Raft) gatherVotes() (bool, int) {
 		}
 
 		go func(server int) {
-			defer totalWg.Done()
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(server, &args, &reply, rpcTimeout)
+			mu.Lock()
+			finished ++
 			if ok && reply.VoteGranted {
-				electWg.Done()
+				votes ++
 			}
-			if ok && int32(reply.Term) > maxTerm.Load() {
-				maxTerm.Store(int32(reply.Term))
+			rf.mu.Lock()
+			if ok && reply.Term > rf.currentTerm {
+				rf.setState(rfStateFollower)
+				rf.currentTerm = reply.Term
 			}
+			rf.mu.Unlock()
+			cond.Broadcast()
+			mu.Unlock()
 		}(server)
 	}
 
-	elected := WaitGroupChannel(&electWg)
-	done := WaitGroupChannel(&totalWg)
-
-	select {
-	case <-elected:
-		return true, int(maxTerm.Load())
-	case <-done:
-		return false, int(maxTerm.Load())
+	needVotes := len(rf.peers) / 2 + 1
+	mu.Lock()
+	defer mu.Unlock()
+	for votes < needVotes && finished < len(rf.peers) - 1 {
+		cond.Wait()
 	}
+	elected := votes >= needVotes
+	return elected
 }
 
 func (rf *Raft) sendHeartbeats() {
