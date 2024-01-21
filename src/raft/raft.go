@@ -64,9 +64,9 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-type logEntry struct {
-	command Command
-	term    int
+type LogEntry struct {
+	Command Command
+	Term    int
 }
 
 // A Go object implementing a single Raft peer.
@@ -77,6 +77,7 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 
 	logger          *log.Logger
+	applyCh         chan ApplyMsg // Channel for applying commands
 	dead            chan struct{}
 	electionTicker  *RandomTicker
 	heartbeatTicker *time.Ticker
@@ -87,7 +88,7 @@ type Raft struct {
 	// Persistent state
 	currentTerm int // Latest term seen (0 on first boot)
 	votedFor    int // Peer that recieved vote in current term (-1 if none)
-	log         []logEntry
+	log         []LogEntry
 
 	// Volatile state for all
 	state       rfState // Current state of the server (follower, candidate, leader)
@@ -118,9 +119,16 @@ func (rf *Raft) GetState() (int, bool) {
 
 func (rf *Raft) lastLogTerm() int {
 	if len(rf.log) == 0 {
-		return -1
+		return 0
 	}
-	return rf.log[len(rf.log)-1].term
+	return rf.log[len(rf.log)-1].Term
+}
+
+func (rf *Raft) prevLogTerm() int {
+	if len(rf.log) < 2 {
+		return 0
+	}
+	return rf.log[len(rf.log)-2].Term
 }
 
 // save Raft's persistent state to stable storage,
@@ -225,8 +233,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -237,15 +249,58 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.logger.Printf("got AppendEntries rpc from rf[i=%d]", args.LeaderId)
+	rf.logger.Printf("got AppendEntries rpc from rf[i=%d] with entries=%v", args.LeaderId, args.Entries)
 	reply.Term = rf.currentTerm
-	reply.Success = args.Term < rf.currentTerm
-	if args.Term >= rf.currentTerm {
-		rf.electionTicker.Reset()
-	}
+	reply.Success = true
+
 	if args.Term > rf.currentTerm {
 		rf.setState(rfStateFollower)
 		rf.currentTerm = args.Term
+	}
+
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		return
+	} else {
+		rf.electionTicker.Reset()
+	}
+
+	if args.PrevLogIndex-1 >= len(rf.log) {
+		reply.Success = false
+		return
+	}
+
+	start := args.PrevLogIndex + 1
+	i := 0
+	if start >= 1 {
+		for i < len(args.Entries) {
+			idx := start - 1 + i
+			if idx >= len(rf.log) {
+				break
+			}
+			entry := rf.log[idx]
+			if entry.Term != args.Entries[i].Term {
+				rf.log = rf.log[:idx]
+				break
+			}
+			i++
+		}
+	}
+
+	newEntries := args.Entries[i:]
+	rf.log = append(rf.log, newEntries...)
+
+	if args.LeaderCommit > rf.commitIndex {
+		commitIndex := minimum(args.LeaderCommit, len(rf.log))
+		for i := rf.commitIndex; i < commitIndex; i++ {
+			rf.logger.Printf("applying command idx=%d", i+1)
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i + 1,
+			}
+		}
+		rf.commitIndex = commitIndex
 	}
 }
 
@@ -291,6 +346,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 }
 
+// TODO: Paper says to "retry RPCs if the do not respond in a timeley manner"
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, timeoutD time.Duration) bool {
 	okC := make(chan bool)
 	timeout := time.NewTimer(timeoutD)
@@ -318,14 +374,62 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
-func (rf *Raft) Start(command Command) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+func (rf *Raft) Start(command Command) (index int, term int, isLeader bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index = -1
+	term = -1
+	isLeader = rf.state == rfStateLeader
+
+	if !isLeader {
+		return
+	}
 
 	// Your code here (2B).
+	rf.log = append(rf.log, LogEntry{
+		Term:    rf.currentTerm,
+		Command: command,
+	})
 
-	return index, term, isLeader
+	// TODO: Send append entries in parallel
+	succeeded := 0
+	for server, _ := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+
+		// TODO: Retry on failure
+		var reply AppendEntriesReply
+		ok := rf.sendAppendEntries(server, &AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: len(rf.log) - 1,
+			PrevLogTerm:  rf.prevLogTerm(),
+			Entries: []LogEntry{
+				{Term: rf.currentTerm, Command: command},
+			},
+			LeaderCommit: rf.commitIndex,
+		}, &reply, rpcTimeout)
+
+		// TODO: Check reply.Term
+		if ok && reply.Success {
+			succeeded += 1
+		}
+	}
+
+	rf.logger.Printf("succeeded to replicate %d", succeeded)
+	if succeeded > len(rf.peers)/2 {
+		rf.logger.Printf("command [idx=%d] replicated on most servers, applying", len(rf.log))
+		rf.applyCh <- ApplyMsg{
+			CommandValid: true,
+			Command:      command,
+			CommandIndex: len(rf.log),
+		}
+		term = rf.currentTerm
+		index = len(rf.log)
+		rf.commitIndex = index
+	}
+	return
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -393,6 +497,7 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) becomeLeader() {
+	// TODO: Initialize leader-only data
 	rf.mu.Lock()
 	rf.setState(rfStateLeader)
 	rf.mu.Unlock()
@@ -452,8 +557,12 @@ func (rf *Raft) sendHeartbeats() {
 	rf.logger.Printf("sending heartbeats")
 	rf.mu.Lock()
 	args := AppendEntriesArgs{
-		Term:     rf.currentTerm,
-		LeaderId: rf.me,
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: len(rf.log) - 1,
+		PrevLogTerm:  rf.prevLogTerm(),
+		Entries:      []LogEntry{},
+		LeaderCommit: rf.commitIndex,
 	}
 	rf.mu.Unlock()
 
@@ -489,6 +598,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
+	rf.applyCh = applyCh
 	rf.me = me
 	rf.electionTicker = NewRandomTicker(300*time.Millisecond, 600*time.Millisecond)
 	rf.heartbeatTicker = time.NewTicker(110 * time.Millisecond)

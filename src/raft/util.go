@@ -4,7 +4,6 @@ import (
 	"log"
 	"math/rand"
 	"sync/atomic"
-	"sync"
 	"time"
 )
 
@@ -18,32 +17,33 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-func WaitGroupChannel(wg *sync.WaitGroup) chan struct{} {
-	c := make(chan struct{})
-	defer func() {
-		wg.Wait()
-		close(c)
-	}()
-	return c
+func minimum(n int, ints ...int) (min int) {
+	min = n
+	for _, num := range ints {
+		if num < min {
+			min = num
+		}
+	}
+	return min
 }
 
 type RandomTicker struct {
-	C      chan time.Time
-	min    time.Duration
-	max    time.Duration
+	C       chan time.Time
+	min     time.Duration
+	max     time.Duration
 	stopped *atomic.Bool
-	stopc  chan struct{}
-	resetc chan struct{}
+	stopc   chan struct{}
+	resetc  chan struct{}
 }
 
 func NewRandomTicker(min, max time.Duration) *RandomTicker {
 	rt := &RandomTicker{
-		C:      make(chan time.Time),
-		min:    min,
-		max:    max,
+		C:       make(chan time.Time),
+		min:     min,
+		max:     max,
 		stopped: &atomic.Bool{},
-		stopc:  make(chan struct{}),
-		resetc: make(chan struct{}),
+		stopc:   make(chan struct{}),
+		resetc:  make(chan struct{}),
 	}
 	go rt.loop()
 	return rt
@@ -67,7 +67,7 @@ func (rt *RandomTicker) loop() {
 
 func (rt *RandomTicker) Reset() (stopped bool) {
 	stopped = rt.stopped.Load()
-	if (!stopped) {
+	if !stopped {
 		rt.resetc <- struct{}{}
 	}
 	return
