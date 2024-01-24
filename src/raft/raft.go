@@ -30,7 +30,9 @@ import (
 	"io/ioutil"
 )
 
-const debug = false
+// TODO: Use uint instead of int in indecies types
+
+const debug = true
 const rpcTimeout = 700 * time.Millisecond
 
 type Command interface{}
@@ -107,6 +109,7 @@ func (rf *Raft) String() string {
 func (rf *Raft) setState(state rfState) {
 	rf.state = state
 	rf.logger.SetPrefix(fmt.Sprintf("%v: ", rf))
+	rf.logger.Printf("set state to %v", rf.state)
 }
 
 // return currentTerm and whether this server
@@ -448,7 +451,7 @@ func (rf *Raft) replicateOnServer(server int) (replicated bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	for len(rf.log) >= rf.nextIndex[server] {
-		prevIndex := rf.nextIndex[server] - 1
+		prevIndex := maximum(rf.nextIndex[server]-1, 0)
 		var prevTerm int
 		if prevIndex > len(rf.log)-1 {
 			panic("unreachable?")
@@ -472,6 +475,12 @@ func (rf *Raft) replicateOnServer(server int) (replicated bool) {
 		ok := rf.sendAppendEntries(server, &args, &reply, rpcTimeout)
 		rf.mu.Lock()
 		if !ok {
+			replicated = false
+			return
+		}
+		if reply.Term > rf.currentTerm {
+			rf.setState(rfStateFollower)
+			rf.currentTerm = reply.Term
 			replicated = false
 			return
 		}
