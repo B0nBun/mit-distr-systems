@@ -27,6 +27,16 @@ func minimum(n int, ints ...int) (min int) {
 	return min
 }
 
+func maximum(n int, ints ...int) (max int) {
+	max = n
+	for _, num := range ints {
+		if num > max {
+			max = num
+		}
+	}
+	return max
+}
+
 type RandomTicker struct {
 	C       chan time.Time
 	min     time.Duration

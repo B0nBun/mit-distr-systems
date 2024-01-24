@@ -346,7 +346,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 }
 
-// TODO: Paper says to "retry RPCs if the do not respond in a timeley manner"
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, timeoutD time.Duration) bool {
 	okC := make(chan bool)
 	timeout := time.NewTimer(timeoutD)
@@ -375,60 +374,115 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command Command) (index int, term int, isLeader bool) {
+	rf.logger.Printf("Start(%v)", command)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index = -1
-	term = -1
 	isLeader = rf.state == rfStateLeader
-
 	if !isLeader {
 		return
 	}
-
-	// Your code here (2B).
 	rf.log = append(rf.log, LogEntry{
 		Term:    rf.currentTerm,
 		Command: command,
 	})
+	index = len(rf.log)
+	term = rf.currentTerm
+	go rf.replicateEntries()
+	return
+}
 
-	// TODO: Send append entries in parallel
-	succeeded := 0
+func (rf *Raft) replicateEntries() {
+	mu := sync.Mutex{}
+	cond := sync.NewCond(&mu)
+	replicated := 1
+	finished := 0
+
+	rf.mu.Lock()
+	logLen := len(rf.log)
+	rf.mu.Unlock()
+	
 	for server, _ := range rf.peers {
 		if server == rf.me {
 			continue
 		}
+		go func(server int) {
+			success := rf.replicateOnServer(server)
+			mu.Lock()
+			if success {
+				replicated ++
+			}
+			finished ++
+			cond.Broadcast()
+			mu.Unlock()
+		}(server)
+	}
 
-		// TODO: Retry on failure
-		var reply AppendEntriesReply
-		ok := rf.sendAppendEntries(server, &AppendEntriesArgs{
+	mu.Lock()
+	for replicated < len(rf.peers) / 2 + 1 && finished < len(rf.peers) - 1 {
+		cond.Wait()
+	}
+	mu.Unlock()
+	rf.mu.Lock()
+	if replicated >= len(rf.peers) / 2 + 1 {
+		for i := rf.commitIndex; i < logLen; i ++ {
+			rf.logger.Printf("command [idx=%d] replicated. Committing", i + 1)
+			msg := ApplyMsg {
+				CommandValid: true,
+				Command: rf.log[i].Command,
+				CommandIndex: i + 1,
+			}
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+			rf.mu.Lock()
+			rf.commitIndex = maximum(rf.commitIndex, i + 1)
+		}
+	} else {
+		rf.logger.Printf("couldn't replicate the idx=%d", logLen)
+	}
+	rf.mu.Unlock()
+	return
+}
+
+// TODO: Don't forget about reply.Term
+func (rf *Raft) replicateOnServer(server int) (replicated bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for len(rf.log) >= rf.nextIndex[server] {
+		prevIndex := rf.nextIndex[server] - 1
+		var prevTerm int
+		if prevIndex > len(rf.log) - 1 {
+			panic("unreachable?")
+		}
+		if prevIndex == 0 {
+			prevTerm = 0
+		} else {
+			prevTerm = rf.log[prevIndex - 1].Term
+		}
+		entries := rf.log[prevIndex:]
+		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
-			PrevLogIndex: len(rf.log) - 1,
-			PrevLogTerm:  rf.prevLogTerm(),
-			Entries: []LogEntry{
-				{Term: rf.currentTerm, Command: command},
-			},
+			PrevLogIndex: prevIndex,
+			PrevLogTerm:  prevTerm,
+			Entries: entries,
 			LeaderCommit: rf.commitIndex,
-		}, &reply, rpcTimeout)
-
-		// TODO: Check reply.Term
-		if ok && reply.Success {
-			succeeded += 1
 		}
-	}
-
-	rf.logger.Printf("succeeded to replicate %d", succeeded)
-	if succeeded > len(rf.peers)/2 {
-		rf.logger.Printf("command [idx=%d] replicated on most servers, applying", len(rf.log))
-		rf.applyCh <- ApplyMsg{
-			CommandValid: true,
-			Command:      command,
-			CommandIndex: len(rf.log),
+		rf.mu.Unlock()
+		var reply AppendEntriesReply
+		ok := rf.sendAppendEntries(server, &args, &reply, rpcTimeout)
+		rf.mu.Lock()
+		if !ok {
+			replicated = false
+			return
 		}
-		term = rf.currentTerm
-		index = len(rf.log)
-		rf.commitIndex = index
-	}
+		if reply.Success {
+			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
+		} else {
+			rf.nextIndex[server] --;
+		}
+	}	
+	replicated = true
 	return
 }
 
@@ -497,9 +551,14 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) becomeLeader() {
-	// TODO: Initialize leader-only data
 	rf.mu.Lock()
 	rf.setState(rfStateLeader)
+	for i, _ := range rf.nextIndex {
+		rf.nextIndex[i] = len(rf.log) + 1
+	}
+	for i, _ := range rf.matchIndex {
+		rf.matchIndex[i] = 0
+	}
 	rf.mu.Unlock()
 	rf.sendHeartbeats()
 }
