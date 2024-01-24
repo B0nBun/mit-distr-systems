@@ -400,7 +400,7 @@ func (rf *Raft) replicateEntries() {
 	rf.mu.Lock()
 	logLen := len(rf.log)
 	rf.mu.Unlock()
-	
+
 	for server, _ := range rf.peers {
 		if server == rf.me {
 			continue
@@ -409,32 +409,32 @@ func (rf *Raft) replicateEntries() {
 			success := rf.replicateOnServer(server)
 			mu.Lock()
 			if success {
-				replicated ++
+				replicated++
 			}
-			finished ++
+			finished++
 			cond.Broadcast()
 			mu.Unlock()
 		}(server)
 	}
 
 	mu.Lock()
-	for replicated < len(rf.peers) / 2 + 1 && finished < len(rf.peers) - 1 {
+	for replicated < len(rf.peers)/2+1 && finished < len(rf.peers)-1 {
 		cond.Wait()
 	}
 	mu.Unlock()
 	rf.mu.Lock()
-	if replicated >= len(rf.peers) / 2 + 1 {
-		for i := rf.commitIndex; i < logLen; i ++ {
-			rf.logger.Printf("command [idx=%d] replicated. Committing", i + 1)
-			msg := ApplyMsg {
+	if replicated >= len(rf.peers)/2+1 {
+		for i := rf.commitIndex; i < logLen; i++ {
+			rf.logger.Printf("command [idx=%d] replicated. Committing", i+1)
+			msg := ApplyMsg{
 				CommandValid: true,
-				Command: rf.log[i].Command,
+				Command:      rf.log[i].Command,
 				CommandIndex: i + 1,
 			}
 			rf.mu.Unlock()
 			rf.applyCh <- msg
 			rf.mu.Lock()
-			rf.commitIndex = maximum(rf.commitIndex, i + 1)
+			rf.commitIndex = maximum(rf.commitIndex, i+1)
 		}
 	} else {
 		rf.logger.Printf("couldn't replicate the idx=%d", logLen)
@@ -450,13 +450,13 @@ func (rf *Raft) replicateOnServer(server int) (replicated bool) {
 	for len(rf.log) >= rf.nextIndex[server] {
 		prevIndex := rf.nextIndex[server] - 1
 		var prevTerm int
-		if prevIndex > len(rf.log) - 1 {
+		if prevIndex > len(rf.log)-1 {
 			panic("unreachable?")
 		}
 		if prevIndex == 0 {
 			prevTerm = 0
 		} else {
-			prevTerm = rf.log[prevIndex - 1].Term
+			prevTerm = rf.log[prevIndex-1].Term
 		}
 		entries := rf.log[prevIndex:]
 		args := AppendEntriesArgs{
@@ -464,7 +464,7 @@ func (rf *Raft) replicateOnServer(server int) (replicated bool) {
 			LeaderId:     rf.me,
 			PrevLogIndex: prevIndex,
 			PrevLogTerm:  prevTerm,
-			Entries: entries,
+			Entries:      entries,
 			LeaderCommit: rf.commitIndex,
 		}
 		rf.mu.Unlock()
@@ -479,9 +479,9 @@ func (rf *Raft) replicateOnServer(server int) (replicated bool) {
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
 		} else {
-			rf.nextIndex[server] --;
+			rf.nextIndex[server]--
 		}
-	}	
+	}
 	replicated = true
 	return
 }
