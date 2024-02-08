@@ -18,19 +18,18 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
 	"fmt"
 	"log"
 	"os"
 	"sync"
 	"time"
-
-	//	"6.5840/labgob"
-	"6.5840/labrpc"
 	"io/ioutil"
+
+	"6.5840/labgob"
+	"6.5840/labrpc"
 )
 
-// TODO: Use uint instead of int in indecies types
 // TODO: Faster algorithm of leader backing up incorrect logs
 
 const debug = false
@@ -87,7 +86,7 @@ type Raft struct {
 	electionTicker  *RandomTicker
 	heartbeatTicker *time.Ticker
 
-	// Your data here (2B, 2C).
+	// Your data here (2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	// Persistent state
@@ -103,6 +102,12 @@ type Raft struct {
 	// Volatile state for leaders
 	nextIndex  []int // For each peer, index of the next log entry to send (leader last log index + 1 initially)
 	matchIndex []int // For each peer, index of the highest log entry known to be replicated (0 initially)
+}
+
+type PersistentState struct {
+	CurrentTerm int
+	VotedFor int
+	Log Log
 }
 
 func (rf *Raft) setState(state rfState) {
@@ -143,33 +148,37 @@ func (log Log) last() (entry LogEntry) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	state := PersistentState {
+		CurrentTerm: rf.currentTerm,
+		VotedFor: rf.votedFor,
+		Log: rf.log,
+	}
+	e.Encode(state)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if data == nil || len(data) < 1 { // bootstrap without any state
+		rf.votedFor = -1
+		rf.currentTerm = 0
+		rf.log = Log{}
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	state := PersistentState{}
+	if err := d.Decode(&state); err != nil {
+		panic(fmt.Sprintf("Couldn't decode persistent state: %v", err))
+	} else {
+	  rf.votedFor = state.VotedFor
+	  rf.currentTerm = state.CurrentTerm
+	  rf.log = state.Log
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -184,7 +193,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (2B).
 	Term         int // Candidate's term
 	CandidateId  int // Candidate that is requesting a vote
 	LastLogIndex int // Index of candidate's last log entry
@@ -201,6 +209,7 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
+	rf.persist()
 	defer rf.mu.Unlock()
 	defer func(reply *RequestVoteReply) {
 		if reply.VoteGranted {
@@ -235,6 +244,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	reply.VoteGranted = true
+	rf.persist()
 }
 
 type AppendEntriesArgs struct {
@@ -253,6 +263,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	rf.persist()
 	defer rf.mu.Unlock()
 
 	if len(args.Entries) > 0 {
@@ -308,6 +319,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.logger.Printf("Committed up to %v", rf.commitIndex)
 	}
 
+	rf.persist()
 	go rf.applyCommitted()
 }
 
@@ -436,9 +448,7 @@ func (rf *Raft) applyCommitted() {
 			Command:      rf.log.at(rf.lastApplied).Command,
 			CommandIndex: rf.lastApplied,
 		}
-		rf.mu.Unlock()
 		rf.applyCh <- msg
-		rf.mu.Lock()
 	}
 }
 
@@ -479,6 +489,7 @@ func (rf *Raft) replicateEntries() {
 		rf.commitIndex = maximum(rf.commitIndex, logLen)
 		rf.logger.Printf("Replicated and committed up to %d", rf.commitIndex)
 	}
+	rf.persist()
 	rf.mu.Unlock()
 	go rf.applyCommitted()
 	return
@@ -495,16 +506,15 @@ func (rf *Raft) replicateOnServer(server int) (replicated bool) {
 		args := rf.getAppendEntriesArgs(server, false)
 		rf.mu.Unlock()
 		var reply AppendEntriesReply
-		// TODO: Paper says "the leader retries AppendEntries RPCs indefinitely"
 		ok := rf.sendAppendEntries(server, &args, &reply, rpcTimeout)
 		rf.mu.Lock()
 		if !ok {
-			replicated = false
-			return
+			continue
 		}
 		if reply.Term > rf.currentTerm {
 			rf.setState(rfStateFollower)
 			rf.currentTerm = reply.Term
+			replicated = false
 			return
 		}
 		if reply.Success {
@@ -570,6 +580,7 @@ func (rf *Raft) startElection() {
 	elected := rf.gatherVotes()
 
 	rf.mu.Lock()
+	rf.persist()
 	stillCandidate := rf.state == rfStateCandidate
 	sameTerm := startingTerm == rf.currentTerm
 	if stillCandidate && elected && sameTerm {
@@ -700,10 +711,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.logger.SetOutput(ioutil.Discard)
 	}
 	rf.setState(rfStateFollower)
-	rf.votedFor = -1
 	rf.dead = make(chan struct{})
 
-	// Your initialization code here (2B, 2C).
+	// Your initialization code here (2C).
 	// Initialize from persisted state
 	rf.readPersist(persister.ReadRaftState())
 
