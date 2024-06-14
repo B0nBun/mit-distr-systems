@@ -19,7 +19,6 @@ package raft
 
 import (
 	//	"bytes"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,6 +75,7 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
+	deadC     chan struct{}
 	l         *log.Logger
 
 	// Your data here (2B, 2C).
@@ -375,7 +375,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	close(rf.deadC)
 	rf.electionTicker.Stop()
+	rf.heartbeatTicker.Stop()
 }
 
 func (rf *Raft) killed() bool {
@@ -410,23 +412,8 @@ func (rf *Raft) sendHeartbeats() {
 	}
 }
 
-func (rf *Raft) heartbeat() {
-	for {
-		<-rf.heartbeatTicker.C
-		rf.mu.Lock()
-		if rf.state != leader {
-			rf.mu.Unlock()
-			continue
-		} else {
-			rf.mu.Unlock()
-		}
-		go rf.sendHeartbeats()
-	}
-}
-
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
-
+	for {
 		select {
 		case <-rf.electionTicker.C:
 			rf.mu.Lock()
@@ -436,14 +423,19 @@ func (rf *Raft) ticker() {
 				go rf.startElection()
 			}
 			rf.mu.Unlock()
-		default:
-			// pass
+		case <-rf.heartbeatTicker.C:
+			// TODO: Maybe use atomic for rf.state to avoid locks
+			rf.mu.Lock()
+			if rf.state != leader {
+				rf.mu.Unlock()
+				continue
+			} else {
+				rf.mu.Unlock()
+			}
+			go rf.sendHeartbeats()
+		case <-rf.deadC:
+			return
 		}
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
@@ -463,6 +455,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.dead = 0
+	rf.deadC = make(chan struct{})
 	rf.l = log.New(os.Stderr, fmt.Sprintf("rf[%d]", rf.me), 0)
 	raftLogs := os.Getenv("RAFT_LOGS") == "true"
 	if !raftLogs {
@@ -489,9 +482,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start ticker goroutine to start elections
 	go rf.ticker()
-	go rf.heartbeat()
 
 
 	return rf
