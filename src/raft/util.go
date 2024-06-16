@@ -1,8 +1,8 @@
 package raft
 
 import (
-	"time"
 	"math/rand"
+	"time"
 )
 
 func minimum(n int, ints ...int) (min int) {
@@ -26,20 +26,20 @@ func maximum(n int, ints ...int) (max int) {
 }
 
 type RandomTicker struct {
-	C       chan time.Time
-	min     time.Duration
-	max     time.Duration
-	stopc   chan struct{}
-	resetc  chan struct{}
+	C      chan time.Time
+	min    time.Duration
+	max    time.Duration
+	stopc  chan struct{}
+	resetc chan struct{}
 }
 
 func NewRandomTicker(min, max time.Duration) *RandomTicker {
 	rt := &RandomTicker{
-		C:       make(chan time.Time),
-		min:     min,
-		max:     max,
-		stopc:   make(chan struct{}),
-		resetc:  make(chan struct{}),
+		C:      make(chan time.Time),
+		min:    min,
+		max:    max,
+		stopc:  make(chan struct{}),
+		resetc: make(chan struct{}),
 	}
 	go rt.loop()
 	return rt
