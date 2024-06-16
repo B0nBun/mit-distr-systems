@@ -67,6 +67,14 @@ const (
 	leader              = 3
 )
 
+func (s *raftState) load() raftState {
+	return raftState(atomic.LoadInt32((*int32)(s)))
+}
+
+func (s *raftState) store(val raftState) {
+	atomic.StoreInt32((*int32)(s), int32(val))
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -114,7 +122,7 @@ func (rf *Raft) lastLogTerm() int {
 }
 
 func (rf *Raft) resetToFollower(newTerm int) {
-	rf.state = follower
+	rf.state.store(follower)
 	rf.currentTerm = newTerm
 	rf.votedFor = -1
 }
@@ -260,7 +268,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Success = true
 	if rf.state == candidate {
-		rf.state = follower
+		rf.state.store(follower)
 	}
 	rf.electionTicker.Reset()
 
@@ -338,7 +346,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) startElection() {
 	rf.l.Printf("start election")
 	rf.mu.Lock()
-	rf.state = candidate
+	rf.state.store(candidate)
 	rf.currentTerm++
 	electionTerm := rf.currentTerm
 	rf.votedFor = rf.me
@@ -389,7 +397,7 @@ func (rf *Raft) startElection() {
 	sameTerm := rf.currentTerm == electionTerm && rf.state == candidate
 	elected := votes >= needVotes
 	if sameTerm && elected {
-		rf.state = leader
+		rf.state.store(leader)
 		rf.cond.Broadcast()
 		rf.l.Printf("broadcast state change to replicator")
 		for i, _ := range rf.peers {
@@ -597,13 +605,13 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		select {
 		case <-rf.electionTicker.C:
-			state := atomic.LoadInt32((*int32)(&rf.state))
+			state := rf.state.load()
 			if state != leader {
 				rf.l.Printf("election time-out")
 				go rf.startElection()
 			}
 		case <-rf.heartbeatTicker.C:
-			state := atomic.LoadInt32((*int32)(&rf.state))
+			state := rf.state.load()
 			if state != leader {
 				continue
 			}
@@ -641,7 +649,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
-	rf.state = follower
+	rf.state.store(follower)
 	rf.commitIndex = -1
 	rf.lastApplied = -1
 	rf.electionTicker = NewRandomTicker(200*time.Millisecond, 400*time.Millisecond)
