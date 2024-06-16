@@ -269,14 +269,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.electionTicker.Reset()
 
-	// TODO: Overwrite only if there is a conflict in the log
 	if len(args.Entries) != 0 {
 		// NOTE: Not the most effective solution, but the easiest
 		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 		rf.cond.Broadcast()
 		rf.l.Printf("broadcast log changes to replicator (AppendEntries)")
 	}
-	lastNewEntry := len(rf.log) - 1 // NOTE: Not sure about this definition of lastNewEntry
+	lastNewEntry := len(rf.log) - 1
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitUpTo(minimum(args.LeaderCommit, lastNewEntry))
 	}
@@ -324,7 +323,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 }
 
-// TODO?: There is a cancellation mechanism built on rf.deadC, so maybe use Context instead
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	if len(args.Entries) > 0 {
 		rf.l.Printf("sendAppendEntries to %d %+v ", server, args)
@@ -399,7 +397,6 @@ func (rf *Raft) startElection() {
 		rf.state = leader
 		rf.cond.Broadcast()
 		rf.l.Printf("broadcast state change to replicator")
-		// NOTE: Not sure about reinitialization of leader's volatile state
 		for i, _ := range rf.peers {
 			rf.nextIndex[i] = len(rf.log)
 			rf.matchIndex[i] = -1
@@ -515,7 +512,6 @@ func (rf *Raft) replicateLogs(server int) {
 	defer rf.mu.Unlock()
 	startTerm := rf.currentTerm
 	for len(rf.log) - 1 >= rf.nextIndex[server] && !rf.killed() {
-		// NOTE: I think follower shouldn't try and replicate logs
 		if rf.currentTerm != startTerm || rf.state != leader {
 			break
 		}
@@ -546,7 +542,7 @@ func (rf *Raft) replicateLogs(server int) {
 		}
 		if reply.Success {
 			rf.nextIndex[server] = untilIndex + 1
-			rf.matchIndex[server] = maximum(untilIndex, rf.matchIndex[server]) // TODO?: Maybe just untilIndex w/o maximum
+			rf.matchIndex[server] = untilIndex
 		} else if reply.XTerm == -1 {
 			rf.nextIndex[server] = reply.XLen
 		} else {
