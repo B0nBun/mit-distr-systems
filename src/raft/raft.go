@@ -77,7 +77,7 @@ type Raft struct {
 	dead      int32               // set by Kill()
 	deadC     chan struct{}
 	applyCh chan ApplyMsg
-	replicateC chan struct{}
+	cond      *sync.Cond
 	l         *log.Logger
 
 	// Your data here (2C).
@@ -227,15 +227,22 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+
+	// For faster backup
+	XTerm int
+	XIndex int
+	XLen int
 }
 
-// TODO: Faster back-up (2C)
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.l.Printf("got AppendEntries %+v", args)
 	rf.mu.Lock()
 	defer rf.l.Printf("respond to AppendEntries %+v", reply)
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
+	reply.XLen = len(rf.log)
+	reply.XTerm = -1
+	reply.XIndex = -1
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
@@ -249,6 +256,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	if args.PrevLogIndex != -1 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+		reply.XIndex = args.PrevLogIndex
+		for reply.XIndex - 1 >= 0 && rf.log[reply.XIndex - 1].Term == reply.XTerm {
+			reply.XIndex --
+		}
 		return
 	}
 	reply.Success = true
@@ -257,9 +269,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.electionTicker.Reset()
 
+	// TODO: Overwrite only if there is a conflict in the log
 	if len(args.Entries) != 0 {
 		// NOTE: Not the most effective solution, but the easiest
 		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+		rf.cond.Broadcast()
+		rf.l.Printf("broadcast log changes to replicator (AppendEntries)")
 	}
 	lastNewEntry := len(rf.log) - 1 // NOTE: Not sure about this definition of lastNewEntry
 	if args.LeaderCommit > rf.commitIndex {
@@ -382,11 +397,15 @@ func (rf *Raft) startElection() {
 	elected := votes >= needVotes
 	if sameTerm && elected {
 		rf.state = leader
+		rf.cond.Broadcast()
+		rf.l.Printf("broadcast state change to replicator")
 		// NOTE: Not sure about reinitialization of leader's volatile state
 		for i, _ := range rf.peers {
 			rf.nextIndex[i] = len(rf.log)
 			rf.matchIndex[i] = -1
 		}
+		rf.cond.Broadcast()
+		rf.l.Printf("broadcast nextIndex changes to replicator")
 		go rf.sendHeartbeats()
 	}
 }
@@ -413,8 +432,8 @@ func (rf *Raft) Start(command Command) (int, int, bool) {
 	rf.l.Printf("start(%+v) -> (%d, %d, %v)", command, index, term, isLeader)
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{ Command: command, Term: term })
-		rf.replicateC<-struct{}{}
-		rf.l.Printf("sent signal to rf.replicateC")
+		rf.cond.Broadcast()
+		rf.l.Printf("broadcast log changes to replicator (Start)")
 	}
 	return index, term, isLeader
 }
@@ -443,6 +462,7 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) commitUpTo(index int) {
 	if index > rf.commitIndex {
 		rf.commitIndex = index
+		rf.l.Printf("commitIndex = %d", rf.commitIndex)
 		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
 			msg := ApplyMsg{
@@ -474,29 +494,34 @@ func (rf *Raft) sendHeartbeats() {
 		}
 		go func(server int) {
 			reply := AppendEntriesReply{}
-			rf.sendAppendEntries(server, &args, &reply)
+			ok := rf.sendAppendEntries(server, &args, &reply)
 			rf.mu.Lock()
-			if reply.Term > rf.currentTerm {
+			if ok && reply.Term > rf.currentTerm {
 				rf.resetToFollower(reply.Term)
+			} else if ok && !reply.Success {
+				rf.nextIndex[server] = minimum(rf.nextIndex[server], args.PrevLogIndex)
 			}
 			rf.mu.Unlock()
 		}(server)
 	}
 }
 
-func (rf *Raft) replicateLogs(server, untilIndex, nextIndex int) (replicated bool) {
-	rf.l.Printf("start to replicate logs server=%d untilIndex=%d nextIndex=%d", server, untilIndex, nextIndex)
-	defer rf.l.Printf("finished replicating logs server=%d untilIndex=%d nextIndex=%d", server, untilIndex, nextIndex)
-	for untilIndex >= nextIndex && !rf.killed() {
-		rf.mu.Lock()
-		// NOTE: Not sure if a follower should still try and replicate logs
-		if rf.state != leader {
-			rf.mu.Unlock()
-			replicated = false
-			return
+func (rf *Raft) replicateLogs(server int) {
+	rf.mu.Lock()
+	rf.l.Printf("start replicating logs for server=%d", server)
+	defer func() {
+		rf.l.Printf("finished replicating logs server=%d (nextIndex[%d]=%d)", server, server, rf.nextIndex[server])
+	}()
+	defer rf.mu.Unlock()
+	startTerm := rf.currentTerm
+	for len(rf.log) - 1 >= rf.nextIndex[server] && !rf.killed() {
+		// NOTE: I think follower shouldn't try and replicate logs
+		if rf.currentTerm != startTerm || rf.state != leader {
+			break
 		}
-		newEntries := rf.log[nextIndex:untilIndex+1]
-		prevLogIndex := nextIndex-1
+		untilIndex := len(rf.log) - 1
+		newEntries := rf.log[rf.nextIndex[server]:untilIndex+1]
+		prevLogIndex := rf.nextIndex[server]-1
 		prevLogTerm := -1
 		if prevLogIndex >= 0 {
 			prevLogTerm = rf.log[prevLogIndex].Term
@@ -511,67 +536,70 @@ func (rf *Raft) replicateLogs(server, untilIndex, nextIndex int) (replicated boo
 		reply := AppendEntriesReply{}
 		rf.mu.Unlock()
 		ok := rf.sendAppendEntries(server, &args, &reply)
+		rf.mu.Lock()
 		if !ok {
 			continue
 		}
 		if reply.Term > args.Term {
-			rf.mu.Lock()
 			rf.resetToFollower(reply.Term)
-			rf.mu.Unlock()
-			replicated = false
-			return
+			break
 		}
 		if reply.Success {
-			nextIndex = untilIndex + 1
+			rf.nextIndex[server] = untilIndex + 1
+			rf.matchIndex[server] = maximum(untilIndex, rf.matchIndex[server]) // TODO?: Maybe just untilIndex w/o maximum
+		} else if reply.XTerm == -1 {
+			rf.nextIndex[server] = reply.XLen
 		} else {
-			nextIndex --
-		}
-	}
-	replicated = nextIndex > untilIndex
-	return
-}
-
-func (rf *Raft) tryReplicate() {
-	rf.l.Printf("tryReplicate()")
-	rf.mu.Lock()
-	lastLogIndex := len(rf.log) - 1
-	nextIndex := make([]int, len(rf.nextIndex))
-	copy(nextIndex, rf.nextIndex)
-	rf.mu.Unlock()
-	for server := range nextIndex {
-		if server == rf.me {
-			continue
-		}
-		go func(server int) {
-			ok := rf.replicateLogs(server, lastLogIndex, nextIndex[server])
-			if !ok || rf.killed() {
-				rf.l.Printf("didn't replicate logs successfully")
-				return
-			}
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			rf.nextIndex[server] = maximum(lastLogIndex+1, rf.nextIndex[server])
-			rf.matchIndex[server] = maximum(lastLogIndex, rf.matchIndex[server])
-			for n := len(rf.log) - 1; n > rf.commitIndex; n -- {
-				if rf.log[n].Term != rf.currentTerm {
-					continue
-				}
-				matched := 1
-				for server := range rf.matchIndex {
-					if server == rf.me {
-						continue
-					}
-					if rf.matchIndex[server] >= n {
-						matched ++
-					}
-				}
-				if matched >= len(rf.peers) / 2 + 1 {
-					rf.commitUpTo(maximum(rf.commitIndex, n))
-					rf.l.Printf("commitIndex = %d", rf.commitIndex)
+			var i int
+			for i = untilIndex; i >= 0; i -- {
+				if rf.log[i].Term == reply.XTerm {
+					break
+				} else if rf.log[i].Term < reply.XTerm {
+					i = -1
 					break
 				}
 			}
-		}(server)
+			if i == -1 {
+				rf.nextIndex[server] = reply.XIndex
+			} else {
+				rf.nextIndex[server] = i
+			}
+		}
+	}
+}
+
+// NOTE: rf.mu must be rf.cond's "locker" for this to work
+func (rf *Raft) replicator(server int) {
+	for !rf.killed() {
+		rf.mu.Lock()
+		for len(rf.log) - 1 < rf.nextIndex[server] || rf.state != leader {
+			rf.cond.Wait()
+		}
+		rf.mu.Unlock()
+		rf.replicateLogs(server)
+		if rf.killed() {
+			return
+		}
+		rf.mu.Lock()
+		for n := len(rf.log) - 1; n > rf.commitIndex; n -- {
+			if rf.log[n].Term != rf.currentTerm {
+				continue
+			}
+			matched := 1
+			for server := range rf.matchIndex {
+				if server == rf.me {
+					continue
+				}
+				if rf.matchIndex[server] >= n {
+					matched ++
+				}
+			}
+			if matched >= len(rf.peers) / 2 + 1 {
+				rf.commitUpTo(n)
+				break
+			}
+		}
+		rf.mu.Unlock()
 	}
 }
 
@@ -590,11 +618,6 @@ func (rf *Raft) ticker() {
 				continue
 			}
 			go rf.sendHeartbeats()
-		case <-rf.replicateC:
-			state := atomic.LoadInt32((*int32)(&rf.state))
-			if state == leader {
-				go rf.tryReplicate()
-			}
 		case <-rf.deadC:
 			return
 		}
@@ -619,7 +642,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.dead = 0
 	rf.deadC = make(chan struct{})
 	rf.applyCh = applyCh
-	rf.replicateC = make(chan struct{})
+	rf.cond = sync.NewCond(&rf.mu)
 	rf.l = log.New(os.Stderr, fmt.Sprintf("rf[%d]: ", rf.me), 0)
 	raftLogs := os.Getenv("RAFT_LOGS") == "true"
 	if !raftLogs {
@@ -647,6 +670,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	go rf.ticker()
+	for server := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+		go rf.replicator(server)
+	}
 
 
 	return rf

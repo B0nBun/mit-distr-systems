@@ -1,8 +1,8 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-export RAFT_LOGS="true"
-PATTERN="2A"
+# export RAFT_LOGS="true"
+PATTERN="2A|2B"
 TIMEOUT=100
 ITERS=100
 
