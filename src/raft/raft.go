@@ -18,7 +18,7 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -27,7 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -87,8 +87,6 @@ type Raft struct {
 	cond      *sync.Cond
 	l         *log.Logger
 
-	// Your data here (2C).
-
 	// Persistent state
 	currentTerm int
 	votedFor    int
@@ -135,34 +133,41 @@ func (rf *Raft) resetToFollower(newTerm int) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	rf.l.Printf("persist currentTerm=%d votedFor=%d len(log)=%d", rf.currentTerm, rf.votedFor, len(rf.log))
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.l.Printf("readPersist: bootstrap without state")
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var (
+		currentTerm int
+		votedFor    int
+		log         []LogEntry
+	)
+	err := firstError(
+		d.Decode(&currentTerm),
+		d.Decode(&votedFor),
+		d.Decode(&log),
+	)
+	if err != nil {
+		rf.l.Fatalf("readPersist error: %v", err)
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
+	rf.l.Printf("readPersist currentTerm=%d votedFor=%d log=%v", currentTerm, votedFor, log)
 }
 
 // the service says it has created a snapshot that has
@@ -196,6 +201,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.l.Printf("respond to RequestVote: %+v", reply)
+	defer rf.persist()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
@@ -240,8 +246,9 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.l.Printf("got AppendEntries %+v", args)
 	rf.mu.Lock()
-	defer rf.l.Printf("respond to AppendEntries %+v", reply)
 	defer rf.mu.Unlock()
+	defer rf.l.Printf("respond to AppendEntries %+v", reply)
+	defer rf.persist()
 	reply.Term = rf.currentTerm
 	reply.XLen = len(rf.log)
 	reply.XTerm = -1
@@ -250,6 +257,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+	rf.electionTicker.Reset()
 	if rf.currentTerm < args.Term {
 		rf.resetToFollower(args.Term)
 	}
@@ -270,17 +278,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.state == candidate {
 		rf.state.store(follower)
 	}
-	rf.electionTicker.Reset()
 
 	if len(args.Entries) != 0 {
 		// NOTE: Not the most effective solution, but the easiest
-		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-		rf.cond.Broadcast()
-		rf.l.Printf("broadcast log changes to replicator (AppendEntries)")
+		for i := 0; i < len(args.Entries); i++ {
+			index := args.PrevLogIndex + i + 1
+			conflict := index >= len(rf.log) || rf.log[index].Term != args.Entries[i].Term
+			if conflict {
+				rf.log = append(rf.log[:index], args.Entries[i:]...)
+				rf.cond.Broadcast()
+				rf.l.Printf("broadcast log changes to replicator (AppendEntries, len(log)=%d)", len(rf.log))
+				break
+			}
+		}
 	}
-	lastNewEntry := len(rf.log) - 1
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitUpTo(minimum(args.LeaderCommit, lastNewEntry))
+		rf.commitUpTo(minimum(args.LeaderCommit, len(rf.log)-1))
 	}
 }
 
@@ -314,10 +327,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	rf.l.Printf("sendRequestVote to %d %+v", server, args)
 	okC := make(chan bool)
-	go func() {
-		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-		okC <- ok
-	}()
+	rf.persist()
+	go func() { okC <- rf.peers[server].Call("Raft.RequestVote", args, reply) }()
 	select {
 	case ok := <-okC:
 		return ok
@@ -331,10 +342,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		rf.l.Printf("sendAppendEntries to %d %+v ", server, args)
 	}
 	okC := make(chan bool)
-	go func() {
-		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-		okC <- ok
-	}()
+	rf.persist()
+	go func() { okC <- rf.peers[server].Call("Raft.AppendEntries", args, reply) }()
 	select {
 	case ok := <-okC:
 		return ok
@@ -398,14 +407,13 @@ func (rf *Raft) startElection() {
 	elected := votes >= needVotes
 	if sameTerm && elected {
 		rf.state.store(leader)
-		rf.cond.Broadcast()
-		rf.l.Printf("broadcast state change to replicator")
+		rf.l.Printf("became leader")
 		for i, _ := range rf.peers {
 			rf.nextIndex[i] = len(rf.log)
 			rf.matchIndex[i] = -1
 		}
 		rf.cond.Broadcast()
-		rf.l.Printf("broadcast nextIndex changes to replicator")
+		rf.l.Printf("broadcast nextIndex and state changes to replicator (startElection, nextIndex[i]=%d)", len(rf.log))
 		go rf.sendHeartbeats()
 	}
 }
@@ -451,6 +459,7 @@ func (rf *Raft) Kill() {
 	close(rf.deadC)
 	rf.electionTicker.Stop()
 	rf.heartbeatTicker.Stop()
+	rf.l.Printf("killed")
 }
 
 func (rf *Raft) killed() bool {
@@ -498,7 +507,26 @@ func (rf *Raft) sendHeartbeats() {
 			if ok && reply.Term > rf.currentTerm {
 				rf.resetToFollower(reply.Term)
 			} else if ok && !reply.Success {
-				rf.nextIndex[server] = minimum(rf.nextIndex[server], args.PrevLogIndex)
+				if reply.XTerm == -1 {
+					rf.nextIndex[server] = reply.XLen
+				} else {
+					var i int
+					for i = args.PrevLogIndex; i >= 0; i-- {
+						if rf.log[i].Term == reply.XTerm {
+							break
+						} else if rf.log[i].Term < reply.XTerm {
+							i = -1
+							break
+						}
+					}
+					if i == -1 {
+						rf.nextIndex[server] = reply.XIndex
+					} else {
+						rf.nextIndex[server] = i
+					}
+				}
+				rf.cond.Broadcast()
+				rf.l.Printf("broadcast nextIndex changes to replicator (sendHeartbeats, nextIndex[%d]=%d)", server, rf.nextIndex[server])
 			}
 			rf.mu.Unlock()
 		}(server)
@@ -646,6 +674,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	if !raftLogs {
 		rf.l.SetOutput(ioutil.Discard)
 	}
+	rf.l.Printf("created")
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
@@ -660,8 +689,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.nextIndex[i] = 0
 		rf.matchIndex[i] = -1
 	}
-
-	// Your initialization code here (2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

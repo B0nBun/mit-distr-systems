@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+func firstError(errors ...error) error {
+	for _, err := range errors {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func minimum(n int, ints ...int) (min int) {
 	min = n
 	for _, num := range ints {
