@@ -80,6 +80,8 @@ type RaftSnapshot struct {
 	Data  []byte
 }
 
+// TODO: Run tests with -race flag
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
