@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # export RAFT_LOGS="true"
-PATTERN="2A|2B|2C"
-TIMEOUT=300
+PATTERN="2A|2B|2C|2D"
+TIMEOUT=600
 ITERS=50
 
 cd src/raft
