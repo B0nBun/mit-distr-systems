@@ -1,13 +1,13 @@
 # Distributed systems
 
-This repository contains my solutions for programming labs from [6.5840: Distributed Systems (Spring 2023)](https://pdos.csail.mit.edu/6.824/)
+This repository contains my solutions for programming labs from [6.5840: Distributed Systems (Spring 2023)](http://nil.csail.mit.edu/6.5840/2023/)
 
 
 > 6.5840 is a core 12-unit graduate subject with lectures, readings, programming labs, an optional project, a mid-term exam, and a final exam. 
 > It will present abstractions and implementation techniques for engineering distributed systems. Major topics include fault tolerance, 
 > replication, and consistency. Much of the class consists of studying and discussing case studies of distributed systems.
 
-All of the details regarding the building/compilation/running/testing process and the tasks themselves can be found on [the page of the course](https://pdos.csail.mit.edu/6.824/).
+All of the details regarding the building/compilation/running/testing process and the tasks themselves can be found on [the page of the course](http://nil.csail.mit.edu/6.5840/2023/).
 
 **I do not study at MIT** and do these labs purely for my own enjoyment and growth, so there may be some inconsistencies and mistakes that I didn't notice.
 
