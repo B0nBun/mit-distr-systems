@@ -346,7 +346,6 @@ const rpcTimeout = 200 * time.Millisecond
 
 func (rf *Raft) sendRPC(method string, server int, args interface{}, reply interface{}) bool {
 	okC := make(chan bool)
-	rf.persist() // Persist after every "outside interaction"
 	go func() { okC <- rf.peers[server].Call(method, args, reply) }()
 	select {
 	case ok := <-okC:
@@ -426,6 +425,9 @@ func (rf *Raft) startElection() {
 			continue
 		}
 		go func(server int) {
+			rf.mu.Lock()
+			rf.persist()
+			rf.mu.Unlock()
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(server, &args, &reply)
 			mu.Lock()
@@ -536,6 +538,9 @@ func (rf *Raft) sendHeartbeats() {
 			continue
 		}
 		go func(server int) {
+			rf.mu.Lock()
+			rf.persist()
+			rf.mu.Unlock()
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(server, &args, &reply)
 			rf.mu.Lock()
@@ -571,10 +576,10 @@ func (rf *Raft) sendHeartbeats() {
 func (rf *Raft) replicateLogs(server int) {
 	rf.mu.Lock()
 	rf.l.Printf("start replicating logs for server=%d", server)
+	defer rf.mu.Unlock()
 	defer func() {
 		rf.l.Printf("finished replicating logs server=%d (nextIndex[%d]=%d)", server, server, rf.nextIndex[server])
 	}()
-	defer rf.mu.Unlock()
 	startTerm := rf.currentTerm
 	for len(rf.log)+rf.lastSnapshotLogLen()-1 >= rf.nextIndex[server] && !rf.killed() {
 		if rf.currentTerm != startTerm || rf.state != leader {
@@ -590,6 +595,7 @@ func (rf *Raft) replicateLogs(server int) {
 				Data:              rf.lastSnapshot.Data,
 			}
 			reply := InstallSnapshotReply{}
+			rf.persist()
 			rf.mu.Unlock()
 			rf.l.Printf("installing snapshot server=%d index=%d, term=%d len(snapshot)=%d", server, args.LastIncludedIndex, args.LastIncludedTerm, len(args.Data))
 			ok := rf.sendInstallSnapshot(server, &args, &reply)
@@ -621,6 +627,7 @@ func (rf *Raft) replicateLogs(server int) {
 			LeaderCommit: rf.commitIndex,
 		}
 		reply := AppendEntriesReply{}
+		rf.persist()
 		rf.mu.Unlock()
 		ok := rf.sendAppendEntries(server, &args, &reply)
 		rf.mu.Lock()
